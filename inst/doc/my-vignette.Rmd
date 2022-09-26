@@ -1,0 +1,252 @@
+---
+title: "scTEP-vignette"
+output: rmarkdown::html_vignette
+
+bibliography: scTEP.bib
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{scTEP}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# The procedure of scTEP
+This vignette provides step-by-step instruction for scTEP R package installation, analyses using an example scRNA-seq datasets, and an in-depth analysis using scRNA-seq data with prior biological knowledge.
+
+
+Install scCAN package from CRAN repository. 
+```{r, eval=FALSE}
+install.packages("scTEP")
+```
+
+To start infer trajectory, load scTEP package:
+```{r setup}
+suppressPackageStartupMessages({
+library(SummarizedExperiment)
+library(scTEP)
+})
+```
+
+
+We select goolam [@goolam2016heterogeneity] data set as an example to show how does scTEP works. This data set is consists of 124 cells and 41,336 genes and included in the scTEP package. *expr* is an expression matrix in which rows represent cells and columns represent genes. *label* is the true development stage of cell. *stages* are all the development stages in the data set. scTEP takes *expr* as the input.
+```{r, eval=FALSE}
+#Load example data (SCE dataset)
+data("goolam")
+#Get data matrix and label
+expr <- as.matrix(t(assay(goolam)))
+label <- as.character(goolam$label)
+stages = goolam@metadata$cell.stages
+```
+
+Inspect the shape of expression matrix *expr*, it is a 124x41,336 matrix. View its ten genes and cells, the rownames is the cell id and the column names are gene names. The numbers in *expr* are total count of gene expressed in a cell. There are several techniques used to normalize the single-cell data sets, such as raw counts, counts per million mapped reads (CPM), reads per kilobase million (RPKM), and transcript per million (TPM). View first ten genes and cells in *expr* matrix, we can see many values are zero.
+```{r, eval=FALSE}
+dim(expr)
+expr[1:10,1:10]
+```
+
+The first step of scTEP, we preprocess the expression matrix *expr*. The preprocessing function first remove genes that does not have cound on any cell. Second, it capitalize all letters in gene names. Last, the preprocessing function perform the log transformation with 2 as the base to rescale the raw expression count until the range of gene expression is smaller than 100 to reduce the technical variability and heterogeneous calibration from sequencing technologies. Check *expr*'s ten genes and cells again, we can see that the counts have been scaled and  *Pbsn*, *H19*, and *Scml2* genes are removed.
+
+```{r, eval=FALSE}
+data = preprocessing(expr)
+data$expr[1:10,1:10]
+```
+
+The *genesets* is a list consists of *mmu* and *hsa* pathway gene names collected from KEGG [@kanehisa2021kegg]. Both *mmu* and *hsa* are consists of more than 300 lists that saved the gene names in pathway. Take the fist pathway of *genesets\$mmu* for example, it have 67 genes.
+The factor analysis match the genes in the *expr* matrix with each list in *genesets\$mmu* and create a submatrix of intersect genes. Then scTEP use *psych::fa* function learn two dimensional latent representation of the intersected submatrix. This process was repeated by scTEP untill go thorugh all the lists in *genesets\$mmu*. 
+The output of scTEP.fa is a matrix in which rows represent cells and columns represent factor representations. Note that *genesets\$mmu* hsa 330 pathways and the shape of *data_fa* is 124x656. This is because two pathways gene lists have too few common genes with *expr* and was removed. View fisrt ten factor representation of first ten cells. Unlike the expression matrix, its factor representations are not sparse.
+```{r, eval=FALSE}
+data("genesets")
+genesets$mmu$`path:mmu00010`
+
+data_fa = scTEP.fa(data, genesets, data_org = 'mmu', seed = 1)
+dim(data_fa)
+data_fa[1:10,1:10]
+```
+
+Conduct clustering using scDHA [@tran2021fast] with k set from 5 to 10. These 6 clustering results will be utilized to produce pseudotimes for cells. *allCluster* is a list consists of those clustering results.
+```{r, eval=FALSE}
+allCluster = scTEP::clustering(data, seed = 1)
+```
+
+scDHA is a function provide by scDHA package. This function will generate latent representations and clustering result using *data_fa*. *scDHA_res\$latent* and *scDHA_res\$cluster* will be used to generate trajectory.
+```{r, eval=FALSE}
+scDHA_res <- scDHA(data_fa, do.clus = T, gen_fil = T, ncores = 16, seed = 1)
+```
+
+scTEP requires the start cell indexes as input. This is prior information that usually given by user. In this vignette, we give scTEP the indexes of start development stage cells.The *trajectoryinference* function require four inputs, they are obtained from previous steps. The output *out* is a list consists of *pseudotime*, *cluster*, *data_clus_cent*, *milestone_network*, and *g*. The *out$pseudotime* is the average pseudotime which calculated using the euclidean distance between cells and start point. The *out\$cluster* is the clustering result obtained from previous step without specifing the number of clusters. The *out\$data_clus_cent* is the center point of clusters in low-dimensional space, and the average pseudotime for each cluster. The *out\$milestone_network* is a dataframe which saved the trajectory. The *out\$g* consist of a igraph object which saves the scTEP's output trajectory and the start cluster id. Above is the whole procedure of scTEP.
+We choose correlation as a metric to evaluate the performance of scTEP.
+
+```{r, eval=FALSE}
+idx = which(label == stages[1])
+out = trajectoryinference(data, idx, scDHA_res, allCluster, seed = 1)
+plot(out$g$g)
+r = round(cor(out$pseudotime, as.numeric(factor(label, levels = stages))), digits = 2)
+```
+![The MST obtained from scTEP.](scTEP_igraph_plot.png)
+
+# The visualization fo scTEP output.
+Next, we present how to visualize the scTEP's output. Prepare for visualization of scTEP output. *cols* are color hex for the figure. UMAP dimension reduction method was choosed to further reduce the scDHA latent to 2 dimenion.
+```{r, eval=FALSE}
+suppressPackageStartupMessages({
+library(irlba)
+library(ggplot2)
+library(uwot)
+})
+# Get 2D emebedding data of the original data.
+cols <- c(
+    "#BC3C29FF", "#0072B5FF", "#E18727FF", "#20854EFF", "#7876B1FF", "#6F99ADFF", "#FFDC91FF",
+    "#EE4C97FF", "#000075", "#a9a9a9", "#8DD3C7", "#C8EABC", "#FBFBB4", "#D9D7C9", "#C3B4D0",
+    "#E39699", "#E9877F", "#A9A0B2", "#97B1BD", "#D9B382",
+    "#EBBD63", "#C4D367", "#C7D98C", "#EED0CD", "#F0D1E1",
+    "#DED7DA", "#CDB7CE", "#BE88BF", "#C2ADC0", "#CBE5C4",
+    "#E4EB9C", "#FFED6F", "#CCFF99", "#33FF00", "#FFDB6D", "#33CC33", "#003300", "#00CC99",
+    "#FFFF00", "#CC9900", "#FFFFCC", "#CCFFCC",
+    "#2059BB", "#16489E", "#0F3980", "#0E2F68", "#8A3ABF",
+    "#7330A0", "#5A3870", "#DE1A64", "#C21A59", "#6D1234", "#3D3135", "#2ABAA4", "#5C9F95",
+    "#335650", "#D55C31", "#B07966", "#E2D8D4"
+  )
+umap.res <- uwot::umap(latent)
+```
+
+First, we visualize the landscpate of the goolam data set. The goolam data set has 5 cell types: *2cell*, *4cell*, *8cell*, *16cell*, and *blast*. The black dot in the figure is the center point of each cell type.
+```{r, eval=FALSE}
+set.seed(1)
+cell_stages <- factor(label, levels = stages)
+label <- as.numeric(factor(label, levels = stages))
+latent <- cbind(umap.res, label) %>% as.data.frame()
+
+# Calculate cluster centroid and create dataframe saving start and end points.
+clus_center <- lapply(1:length(unique(label)), function(cl) colMeans(latent[label == cl, ])) %>%
+  do.call(what = rbind)
+colnames(clus_center) <- c("x", "y", "cluster_id")
+
+figure <- ggplot2::ggplot(latent, ggplot2::aes(x = V1, y = V2, color = cell_stages)) +
+  ggplot2::geom_point() +
+  # Plot the centroid
+  ggplot2::geom_point(data = as.data.frame(clus_center), ggplot2::aes(x = x, y = y), color = 'black', size = 2) +
+  ggplot2::labs(x = paste0("UMAP1"), y = paste0("UMAP2"), title = paste("Landscape")) +
+  ggplot2::theme_classic() +
+  ggplot2::scale_color_manual(values = cols) +
+  # annotate(geom = "table", x=min(tsne_original$V1),y=min(tsne_original$V2), label = silhou)+
+  # scale_color_npg()+
+  ggsci::scale_fill_npg() +
+  ggplot2::theme(
+    legend.position = "right"
+  )
+figure
+```
+
+![The landscape of Goolam data set using UMAP and colored by ground truth development stages.](goolam_landscape.png)
+
+
+Second, we color the landscape of goolam data set with the scTEP's output pseudotime. 
+```{r, eval=FALSE}
+latent <- uwot::umap(scDHA_res$latent) %>% as.data.frame()
+pseudotime = out$pseudotime
+# Calculate cluster centroid and create dataframe saving start and end points.
+figure <- ggplot2::ggplot(latent, ggplot2::aes(x = V1, y = V2)) +
+  ggplot2::labs(x = paste0("UMAP1"), y = paste0("UMAP2"), title = paste("Pseudotime landscape")) +
+  ggplot2::geom_point(ggplot2::aes(color = pseudotime), size = 2) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    legend.position = "right",
+    plot.title = ggplot2::element_text(),
+    axis.text = ggplot2::element_text(),
+    axis.title = ggplot2::element_text(),
+    legend.key.size = ggplot2::unit(1, "cm"), legend.text = ggplot2::element_text(), legend.title = ggplot2::element_text)
+figure
+```
+
+![The landscape of goolam data set and colored by the scTEP's output pseudotime.](goolam_scTEP_pseudotime.png)
+
+Third, we visualization of scTEP's output trajectory. An imperfection is that scTEP generates an extra branch.
+```{r, eval=FALSE}
+# Draw trajectory plot
+edge_nodes <- out$milestone_network[, 1:2] %>% as.data.frame()
+cluster = out$cluster
+latent <- cbind(umap.res, cluster) %>% as.data.frame()
+cell_stages <- factor(cluster)
+
+# Calculate cluster centroid and create dataframe saving start and end points.
+clus_center <- lapply(1:length(unique(cluster)), function(cl) colMeans(latent[which(cluster == cl), ])) %>%
+  do.call(what = rbind)
+
+colnames(clus_center) <- c("x", "y", "cluster_id")
+clulines <- NULL
+for (edge_index in 1:nrow(edge_nodes)) {
+  start_cluster <- edge_nodes[edge_index, 1] %>% as.numeric()
+  end_cluster <- edge_nodes[edge_index, 2] %>% as.numeric()
+  temp_points <- c(
+    clus_center[, "x"][start_cluster], clus_center[, "y"][start_cluster],
+    clus_center[, "x"][end_cluster], clus_center[, "y"][end_cluster]
+  )
+  clulines <- rbind(clulines, temp_points)
+}
+colnames(clulines) <- c("x", "y", "xend", "yend")
+clulines <- as.data.frame(clulines)
+clulines$x.mid <- (clulines$x + clulines$xend) / 2
+clulines$y.mid <- (clulines$y + clulines$yend) / 2
+
+
+figure <- ggplot2::ggplot(latent, ggplot2::aes(x = V1, y = V2, color = cell_stages)) +
+  ggplot2::geom_point() +
+  # Plot the centroid
+  ggplot2::geom_point(data = as.data.frame(clus_center), ggplot2::aes(x = x, y = y), color = "black", size = 2) +
+  ggplot2::labs(x = paste0("UMAP1"), y = paste0("UMAP2"), title = paste("Trajectory")) +
+  # Add Sting to the figure
+  ggplot2::geom_segment(ggplot2::aes_string(x = "x.mid", xend = "xend", y = "y.mid", yend = "yend", size = NULL),
+                        data = clulines, color = "black", size = 1.25
+  ) +
+  # Add arrow to string
+  ggplot2::geom_segment(
+    arrow = ggplot2::arrow(length = ggplot2::unit(0.3, "cm"), type = "closed", ends = "last"),
+    ggplot2::aes_string(x = "x", xend = "x.mid", y = "y", yend = "y.mid", size = NULL),
+    data = clulines, color = "black", size = 1.25
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::scale_color_manual(values = cols) +
+  ggsci::scale_fill_npg() +
+  ggplot2::theme(
+    legend.position = "right",
+    plot.title = ggplot2::element_text(),
+    axis.text = ggplot2::element_text(),
+    axis.title = ggplot2::element_text(),
+    legend.key.size = ggplot2::unit(1, "cm"), legend.text = ggplot2::element_text(), legend.title = ggplot2::element_text()
+  )
+figure
+```
+
+![The scTEP's output trajectory visualized in reduced dimensional space using UMAP.](goolam_scTEP_trajectory.png)
+
+The visualization of scTEP's pseudotime. The x-axis is the pseudotime, the y-axis is the cell's true type. The pseudotime of  *2cell*, *4cell*, and *8cell* are consistent with ground truth. The pseudotime of *16cell*, and *blast* are the same, which is different from the groud truth.
+```{r, eval=FALSE}
+#Draw_dev_pseudotime <- function(dataset, label, cell.stages, pseudotime, r, cols) {
+raw <- goolam$label %>% as.character() %>% as.data.frame()
+raw$time <- pseudotime
+raw[, 1] <- factor(raw[, 1], levels = stages)
+colnames(raw) <- c("cell_type","pseudotime")
+figure <- ggplot2::ggplot(raw, ggplot2::aes(y = cell_type, x = pseudotime, color = cell_type)) +
+  ggplot2::geom_jitter() +
+  ggplot2::labs(x = "Pseudo Time", y = "", title = paste0("Pseudotime")) +
+  ggplot2::scale_color_manual(values = cols) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    legend.position = "right",
+    plot.title = ggplot2::element_text(size = 20),
+    axis.text = ggplot2::element_text(size = 20),
+    axis.title = ggplot2::element_text(size = 20),
+    legend.key.size = ggplot2::unit(1, "cm"), legend.text = ggplot2::element_text(size = 20), legend.title = ggplot2::element_text(size = 20),
+  )
+figure
+```
+
+![The scTEP's output pseudotime compare with ground truth development stages.](scTEP_pseudotime.png)
+
+# Reference
